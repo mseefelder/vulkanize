@@ -1,5 +1,5 @@
 // Following a tutorial. Currently on this part:
-// https://vulkan-tutorial.com/Drawing_a_triangle/Setup/Physical_devices_and_queue_families
+// https://vulkan-tutorial.com/Drawing_a_triangle/Setup/Logical_device_and_queues
 
 //Vulkan functions, structures and enumerations
 //Same as "#include <vulkan/vulkan.h>" but with GLFW
@@ -51,7 +51,7 @@ const std::vector<const char*> validationLayers = {
 	 }
  }
 
-//Wrapper to allow automatic Vulkan Object cleanup
+// Wrapper to allow automatic Vulkan Object cleanup
 template <typename T>
 class VDeleter {
 public:
@@ -150,6 +150,15 @@ private:
 	}
 };
 
+// structure for queue family querying, where an index of -1 will denote "not found"
+struct QueueFamilyIndices {
+	int graphicsFamily = -1;
+
+	bool isComplete() {
+		return graphicsFamily >= 0;
+	}
+};
+
 /*
 The program itself is wrapped into a class where we'll store the Vulkan objects as
 private class members and add functions to initiate each of them, which will be 
@@ -164,6 +173,9 @@ public:
 	}
 
 private:
+	/*
+		~~~~~~MEMBERS~~~~~~
+	*/
 	GLFWwindow* window;
 
 	VDeleter<VkInstance> instance{ vkDestroyInstance };
@@ -171,6 +183,14 @@ private:
 	// the debug callback in Vulkan is managed with a handle that needs 
 	//to be explicitly created and destroyed
 	VDeleter<VkDebugReportCallbackEXT> callback{ instance, DestroyDebugReportCallbackEXT };
+
+	// The graphics card selected. This object will be implicitly 
+	//destroyed when the VkInstance is destroyed, so we don't need to add a delete wrapper.
+	VkPhysicalDevice physicalDevice = VK_NULL_HANDLE;
+
+	/*
+		~~~~~~FUNCTIONS~~~~~~
+	*/
 
 	void initWindow() {
 		// initializes the GLFW library
@@ -189,6 +209,7 @@ private:
 	void initVulkan() {
 		createInstance();
 		setupDebugCallback();
+		pickPhysicalDevice();
 	}
 
 	//Rendering loop that iterates until the window is closed in a moment.
@@ -327,7 +348,8 @@ private:
 
 	// Callback function. The VKAPI_ATTR and VKAPI_CALL ensure that the function 
 	//has the right signature for Vulkan to call it.
-	static VKAPI_ATTR VkBool32 VKAPI_CALL debugCallback(
+	static VKAPI_ATTR VkBool32 VKAPI_CALL debugCallback
+	(
 		VkDebugReportFlagsEXT flags,
 		VkDebugReportObjectTypeEXT objType,
 		uint64_t obj,
@@ -335,7 +357,8 @@ private:
 		int32_t code,
 		const char* layerPrefix,
 		const char* msg,
-		void* userData) {
+		void* userData
+	) {
 
 		std::cerr << "validation layer: " << msg << std::endl;
 
@@ -353,6 +376,94 @@ private:
 		if (CreateDebugReportCallbackEXT(instance, &createInfo, nullptr, callback.replace()) != VK_SUCCESS) {
 			throw std::runtime_error("failed to set up debug callback!");
 		}
+	}
+
+	void pickPhysicalDevice() {
+		// First, query the number of available devices
+		uint32_t deviceCount = 0;
+		vkEnumeratePhysicalDevices(instance, &deviceCount, nullptr);
+		// If none, there's no point on going further
+		if (deviceCount == 0) {
+			throw std::runtime_error("failed to find GPUs with Vilkan support!");
+		}
+		// Otherwise we allocate an array to hold all VkPhysicalDevice handles
+		std::vector<VkPhysicalDevice> devices(deviceCount);
+		vkEnumeratePhysicalDevices(instance, &deviceCount, devices.data());
+		// Check if any of the physical devices meet our requirements
+		for (const auto& device : devices) {
+			if (isDeviceSuitable(device)) {
+				physicalDevice = device;
+				break;
+			}
+		}
+
+		if (physicalDevice == VK_NULL_HANDLE) {
+			throw std::runtime_error("no Vulkan supporting GPU can do what you need!");
+		}
+	}
+
+	// Check if physiscal device supports the operations we'll perform
+	bool isDeviceSuitable(VkPhysicalDevice device) {
+		/**
+			//For now, we'll stick to devices that just support Vulkan
+			//and the needed queues.
+			//But:
+
+			//Basic device properties like the name, type and supported Vulkan 
+			//version can be queried using:
+			VkPhysicalDeviceProperties deviceProperties;
+			vkGetPhysicalDeviceProperties(device, &deviceProperties);
+
+			//The support for optional features like texture compression, 
+			//64 bit floats and multi viewport rendering (useful for VR) 
+			//can be queried using:
+			VkPhysicalDeviceFeatures deviceFeatures;
+			vkGetPhysicalDeviceFeatures(device, &deviceFeatures);
+
+			// let's say we consider our application only usable for dedicated 
+			//graphics cards that support geometry shaders. Then we would return:
+			return deviceProperties.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU &&
+			deviceFeatures.geometryShader;
+
+			//more ideas on:
+			// https://vulkan-tutorial.com/Drawing_a_triangle/Setup/Physical_devices_and_queue_families
+		/**/
+		QueueFamilyIndices indices = findQueueFamilies(device);
+
+		return indices.isComplete();
+	}
+
+	// Function to check which queue families are supported by the device 
+	//and which one of these supports the commands that we want to use.
+	QueueFamilyIndices findQueueFamilies(VkPhysicalDevice device) {
+		QueueFamilyIndices indices;
+
+		// Same structure: query amount then allocate and query details
+		uint32_t queueFamilyCount = 0;
+		vkGetPhysicalDeviceQueueFamilyProperties(device, &queueFamilyCount, nullptr);
+
+		std::vector<VkQueueFamilyProperties> queueFamilies(queueFamilyCount);
+		vkGetPhysicalDeviceQueueFamilyProperties(device, &queueFamilyCount, queueFamilies.data());
+
+		// The VkQueueFamilyProperties struct contains some details about the queue family, 
+		//including the type of operations that are supported and the number of queues that 
+		//can be created based on that family
+		int i = 0;
+		for (const auto& queueFamily : queueFamilies) {
+			// We need to find at least one queue family that supports VK_QUEUE_GRAPHICS_BIT
+			//so that it supports graphics commands
+			if (queueFamily.queueCount > 0 && queueFamily.queueFlags & VK_QUEUE_GRAPHICS_BIT) {
+				indices.graphicsFamily = i;
+			}
+
+			if (indices.isComplete()) {
+				break;
+			}
+
+			i++;
+		}
+
+		return indices;
 	}
 };
 
