@@ -1,5 +1,5 @@
 // Following a tutorial. Currently on this part:
-// https://vulkan-tutorial.com/Drawing_a_triangle/Setup/Logical_device_and_queues
+// https://vulkan-tutorial.com/Drawing_a_triangle/Presentation/Window_surface
 
 //Vulkan functions, structures and enumerations
 //Same as "#include <vulkan/vulkan.h>" but with GLFW
@@ -188,6 +188,17 @@ private:
 	//destroyed when the VkInstance is destroyed, so we don't need to add a delete wrapper.
 	VkPhysicalDevice physicalDevice = VK_NULL_HANDLE;
 
+	// Placed the declaration below the VkInstance member, because it needs to be cleaned up 
+	//before the instance is cleaned up.
+	// More on destruction order: https://msdn.microsoft.com/en-us/library/6t4fe76c.aspx
+	// Logical devices are cleaned up with the vkDestroyDevice function.
+	VDeleter<VkDevice> device{ vkDestroyDevice };
+
+	// Member to store a handle to the graphics queue
+	// Device queues are implicitly cleaned up when the device is destroyed, so we don't need to 
+	//wrap it in a deleter object.
+	VkQueue graphicsQueue;
+
 	/*
 		~~~~~~FUNCTIONS~~~~~~
 	*/
@@ -210,6 +221,7 @@ private:
 		createInstance();
 		setupDebugCallback();
 		pickPhysicalDevice();
+		createLogicalDevice();
 	}
 
 	//Rendering loop that iterates until the window is closed in a moment.
@@ -358,7 +370,8 @@ private:
 		const char* layerPrefix,
 		const char* msg,
 		void* userData
-	) {
+	)
+	{
 
 		std::cerr << "validation layer: " << msg << std::endl;
 
@@ -464,6 +477,57 @@ private:
 		}
 
 		return indices;
+	}
+
+	void createLogicalDevice() {
+		QueueFamilyIndices indices = findQueueFamilies(physicalDevice);
+
+		// This structure describes the number of queues we want for a single queue family.
+		VkDeviceQueueCreateInfo queueCreateInfo = {};
+		queueCreateInfo.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
+		queueCreateInfo.queueFamilyIndex = indices.graphicsFamily;
+		queueCreateInfo.queueCount = 1;
+		// Vulkan lets you assign priorities to queues to influence the scheduling of 
+		//command buffer execution.
+		// Priority is a value in [0.0, 1.0]
+		// This is required even if there is only a single queue
+		float queuePriority = 1.0f;
+		queueCreateInfo.pQueuePriorities = &queuePriority;
+
+		// Set of device features that we'll be using (the ones we queried support for)
+		VkPhysicalDeviceFeatures deviceFeatures = {};
+
+		// With the two structures above, we can start the creation of the logical device
+		VkDeviceCreateInfo createInfo = {};
+		createInfo.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
+		// Pointer to queue creation info
+		createInfo.pQueueCreateInfos = &queueCreateInfo;
+		createInfo.queueCreateInfoCount = 1;
+		// Pointer to desired features
+		createInfo.pEnabledFeatures = &deviceFeatures;
+
+		// Information similar to VkInstanceCreateInfo (extensions and validation layers), but
+		//device specific
+		// For now, enable the same validation layers for devices as we did for the instance
+		createInfo.enabledExtensionCount = 0;
+
+		if (enableValidationLayers) {
+			createInfo.enabledLayerCount = validationLayers.size();
+			createInfo.ppEnabledLayerNames = validationLayers.data();
+		}
+		else {
+			createInfo.enabledLayerCount = 0;
+		}
+
+		// And now... create it!
+		if (vkCreateDevice(physicalDevice, &createInfo, nullptr, device.replace()) != VK_SUCCESS) {
+			throw std::runtime_error("failed to create logical device!");
+		}
+
+		// Retrieve queue handles for each queue family. The parameters are the logical device, 
+		//queue family, queue index and a pointer to the variable to store the queue handle in. 
+		// Because we're only creating a single queue from this family, we'll simply use index 0.
+		vkGetDeviceQueue(device, indices.graphicsFamily, 0, &graphicsQueue);
 	}
 };
 
