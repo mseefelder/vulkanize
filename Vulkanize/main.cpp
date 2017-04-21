@@ -1,5 +1,5 @@
 // Following a tutorial. Currently on this part:
-// https://vulkan-tutorial.com/Drawing_a_triangle/Presentation/Window_surface
+// https://vulkan-tutorial.com/Drawing_a_triangle/Presentation/Swap_chain
 
 //Vulkan functions, structures and enumerations
 //Same as "#include <vulkan/vulkan.h>" but with GLFW
@@ -14,6 +14,8 @@
 #include <vector>
 // For strcmp
 #include <cstring>
+// For the set of all unique queue families that are necessary for the required queues
+#include <set>
 
 const int WIDTH = 800;
 const int HEIGHT = 600;
@@ -153,9 +155,13 @@ private:
 // structure for queue family querying, where an index of -1 will denote "not found"
 struct QueueFamilyIndices {
 	int graphicsFamily = -1;
+	// It's actually possible that the queue families supporting drawing commands and 
+	//the ones supporting presentation do not overlap. Therefore we have to take into 
+	//account that there could be a distinct presentation queue
+	int presentFamily = -1;
 
 	bool isComplete() {
-		return graphicsFamily >= 0;
+		return graphicsFamily >= 0 && presentFamily >= 0;
 	}
 };
 
@@ -184,6 +190,10 @@ private:
 	//to be explicitly created and destroyed
 	VDeleter<VkDebugReportCallbackEXT> callback{ instance, DestroyDebugReportCallbackEXT };
 
+	// object that represents an abstract type of surface to present rendered images to. 
+	//The surface in our program will be backed by the window that we've already opened with GLFW.
+	VDeleter<VkSurfaceKHR> surface{ instance, vkDestroySurfaceKHR };
+
 	// The graphics card selected. This object will be implicitly 
 	//destroyed when the VkInstance is destroyed, so we don't need to add a delete wrapper.
 	VkPhysicalDevice physicalDevice = VK_NULL_HANDLE;
@@ -198,6 +208,7 @@ private:
 	// Device queues are implicitly cleaned up when the device is destroyed, so we don't need to 
 	//wrap it in a deleter object.
 	VkQueue graphicsQueue;
+	VkQueue presentQueue;
 
 	/*
 		~~~~~~FUNCTIONS~~~~~~
@@ -220,11 +231,23 @@ private:
 	void initVulkan() {
 		createInstance();
 		setupDebugCallback();
+		createSurface();
 		pickPhysicalDevice();
 		createLogicalDevice();
 	}
 
-	//Rendering loop that iterates until the window is closed in a moment.
+	// On each platform there are subtle differences on how to create surfaces. But, as we're using
+	//GLFW, the glfwCreateWindowSurface takes care of that for us. For details on how it works w/o GLFW:
+	// https://vulkan-tutorial.com/Drawing_a_triangle/Presentation/Window_surface
+	void createSurface() {
+		// The parameters are the VkInstance, GLFW window pointer, custom allocators and pointer to 
+		//VkSurfaceKHR variable. It simply passes through the VkResult from the relevant platform call.
+		if (glfwCreateWindowSurface(instance, window, nullptr, surface.replace()) != VK_SUCCESS) {
+			throw std::runtime_error("failed to create window surface!");
+		}
+	}
+
+	// Rendering loop that iterates until the window is closed in a moment.
 	void mainLoop() {
 		while (!glfwWindowShouldClose(window)) {
 			glfwPollEvents();
@@ -469,6 +492,21 @@ private:
 				indices.graphicsFamily = i;
 			}
 
+			// Look for a queue family that has the capability of presenting to our window surface
+			//Takes the physical device, queue family index and surface as parameters
+			VkBool32 presentSupport = false;
+			vkGetPhysicalDeviceSurfaceSupportKHR(device, i, surface, &presentSupport);
+
+			// Check the value of the boolean for presentation and store the presentation family 
+			//queue index
+			if (queueFamily.queueCount > 0 && presentSupport) {
+				indices.presentFamily = i;
+			}
+			// IMPROVEMENT:  it's very likely that drawing and presentation end up being the same queue 
+			//family after all, but throughout the program we will treat them as if they were separate 
+			//queues for a uniform approach. BUT one could add logic to explicitly prefer a physical 
+			//device that supports drawing and presentation in the same queue for improved performance.
+
 			if (indices.isComplete()) {
 				break;
 			}
@@ -482,17 +520,25 @@ private:
 	void createLogicalDevice() {
 		QueueFamilyIndices indices = findQueueFamilies(physicalDevice);
 
-		// This structure describes the number of queues we want for a single queue family.
-		VkDeviceQueueCreateInfo queueCreateInfo = {};
-		queueCreateInfo.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
-		queueCreateInfo.queueFamilyIndex = indices.graphicsFamily;
-		queueCreateInfo.queueCount = 1;
+		std::vector<VkDeviceQueueCreateInfo> queueCreateInfos;
+		// Create a set of all unique queue families that are necessary for the required queues
+		std::set<int> uniqueQueueFamilies = { indices.graphicsFamily, indices.presentFamily };
+
 		// Vulkan lets you assign priorities to queues to influence the scheduling of 
 		//command buffer execution.
 		// Priority is a value in [0.0, 1.0]
 		// This is required even if there is only a single queue
 		float queuePriority = 1.0f;
-		queueCreateInfo.pQueuePriorities = &queuePriority;
+		// Multiple VkDeviceQueueCreateInfo structs to create a queue from multiple families
+		for (int queueFamily : uniqueQueueFamilies) {
+			// This structure describes the number of queues we want for a single queue family.
+			VkDeviceQueueCreateInfo queueCreateInfo = {};
+			queueCreateInfo.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
+			queueCreateInfo.queueFamilyIndex = queueFamily;
+			queueCreateInfo.queueCount = 1;
+			queueCreateInfo.pQueuePriorities = &queuePriority;
+			queueCreateInfos.push_back(queueCreateInfo);
+		}
 
 		// Set of device features that we'll be using (the ones we queried support for)
 		VkPhysicalDeviceFeatures deviceFeatures = {};
@@ -500,9 +546,10 @@ private:
 		// With the two structures above, we can start the creation of the logical device
 		VkDeviceCreateInfo createInfo = {};
 		createInfo.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
-		// Pointer to queue creation info
-		createInfo.pQueueCreateInfos = &queueCreateInfo;
-		createInfo.queueCreateInfoCount = 1;
+		// Pointer to queue creation infos vector data
+		createInfo.pQueueCreateInfos = queueCreateInfos.data();
+		// Count of queueCreateInfos
+		createInfo.queueCreateInfoCount = (uint32_t) queueCreateInfos.size();
 		// Pointer to desired features
 		createInfo.pEnabledFeatures = &deviceFeatures;
 
@@ -526,8 +573,9 @@ private:
 
 		// Retrieve queue handles for each queue family. The parameters are the logical device, 
 		//queue family, queue index and a pointer to the variable to store the queue handle in. 
-		// Because we're only creating a single queue from this family, we'll simply use index 0.
+		// Because we're only creating a single queue from these families, we'll simply use index 0.
 		vkGetDeviceQueue(device, indices.graphicsFamily, 0, &graphicsQueue);
+		vkGetDeviceQueue(device, indices.presentFamily, 0, &presentQueue);
 	}
 };
 
